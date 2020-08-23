@@ -21,7 +21,7 @@ function parse_commandline()
         "--contextwindow", "-w"
             help = "window before and after the base to be counted that should not contain mismatches or indels"
             arg_type = Int
-            default = 5
+            default = 6
         "--single-end"
             help = "flag indicating BAM file contains unpaired reads"
             action = :store_true
@@ -30,6 +30,9 @@ function parse_commandline()
             action = :store_true
         "--forwardorientation", "-f"
             help = "flag indicating reads (or first read in a pair) are the forward RNA strand, unlike the usual Illumina libraries"
+            action = :store_true
+        "--UtoC", "-u"
+            help = "flag indicating whether to count U to C mismatches as editing events"
             action = :store_true
         "--outfile","-o"
             help = "path to results file"
@@ -64,12 +67,13 @@ function main()
     mapQ_threshold = parsed_args["mapQ"]
     baseQ_threshold = parsed_args["baseQ"]
     contextwindow = parsed_args["contextwindow"]
+    utoc = parsed_args["UtoC"]
 
     #defaults to paired_end
     if parsed_args["single-end"]
-        fwd_base_counts, rev_base_counts = unpairedcountbases(refseqs,reader,mapQ_threshold,baseQ_threshold,contextwindow)
+        fwd_base_counts, rev_base_counts = unpairedcountbases(refseqs,reader,mapQ_threshold,baseQ_threshold,contextwindow,utoc)
     else parsed_args["paired-end"]
-        fwd_base_counts, rev_base_counts = pairedcountbases(refseqs,reader,mapQ_threshold,baseQ_threshold,contextwindow)
+        fwd_base_counts, rev_base_counts = pairedcountbases(refseqs,reader,mapQ_threshold,baseQ_threshold,contextwindow,utoc)
     end
 
     close(reader)

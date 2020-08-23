@@ -1,15 +1,34 @@
 function isforwardstrand(record::BAM.Record)
-    if BAM.flag(record) & SAM.FLAG_READ1 == 0
-        if BAM.flag(record) & SAM.FLAG_REVERSE == 0
+    if BAM.flag(record) & SAM.FLAG_READ1 ≠ 0               # if it's read1
+        if BAM.flag(record) & SAM.FLAG_REVERSE ≠ 0         # and if it's reverse complement
             return true
         end
-    elseif BAM.flag(record) & SAM.FLAG_REVERSE ≠ 0
+    elseif BAM.flag(record) & SAM.FLAG_READ2 ≠ 0           # if it's read2
+        if BAM.flag(record) & SAM.FLAG_REVERSE == 0        # and it's forward
+            return true
+        end
+    elseif BAM.flag(record) & SAM.FLAG_REVERSE ≠ 0        # if it's single-end & reverse complement
             return true
     end
     return false
 end
 
-function pairedcountbases(refseqs::Array{LongDNASeq},reader::BAM.Reader,mapQ_threshold::Int,baseQ_threshold::Int,contextwindow::Int)
+function pairpassesmuster(flags1,flags2)
+    flags1 & SAM.FLAG_PROPER_PAIR == 0 && return false
+    flags1 & SAM.FLAG_SECONDARY ≠ 0 && return false
+    flags1 & SAM.FLAG_QCFAIL ≠ 0 && return false
+    flags1 & SAM.FLAG_DUP ≠ 0 && return false
+    flags1 & SAM.FLAG_SUPPLEMENTARY ≠ 0 && return false
+
+    flags2 & SAM.FLAG_PROPER_PAIR == 0 && return false
+    flags2 & SAM.FLAG_SECONDARY ≠ 0 && return false
+    flags2 & SAM.FLAG_QCFAIL ≠ 0 && return false
+    flags2 & SAM.FLAG_DUP ≠ 0 && return false
+    flags2 & SAM.FLAG_SUPPLEMENTARY ≠ 0 && return false
+    return true
+end
+
+function pairedcountbases(refseqs::Array{LongDNASeq},reader::BAM.Reader,mapQ_threshold::Int,baseQ_threshold::Int,contextwindow::Int,utoc::Bool)
 
     fwd_base_counts = Array{Array{Int}}(undef,length(refseqs))
     rev_base_counts = Array{Array{Int}}(undef,length(refseqs))
@@ -22,33 +41,30 @@ function pairedcountbases(refseqs::Array{LongDNASeq},reader::BAM.Reader,mapQ_thr
     fwd_bases = Dict(DNA_A=>1, DNA_C=>2, DNA_G=>3, DNA_T=>4)
     rev_bases = Dict(DNA_A=>4, DNA_C=>3, DNA_G=>2, DNA_T=>1)
 
-    record1 = BAM.Record()
-    record2 = BAM.Record()
+    queue = Vector{BAM.Record}(undef,0)
     num_pairs = 0
 
-    while !eof(reader)
-        read!(reader, record1)
-        #println("reading ",BAM.tempname(record1)," refID: ",BAM.refid(record1))
-        read!(reader, record2)
-        #println("reading ",BAM.tempname(record2))
+    for next_record in reader
+        !BAM.isfilled(next_record) && continue
+        #println("reading ",BAM.tempname(next_record)," refID: ",BAM.flag(next_record))
+        push!(queue,next_record)
+        length(queue) != 2 && continue
+        if BAM.tempname(queue[1]) != BAM.tempname(queue[2])
+            popfirst!(queue)
+            continue
+        end
 
-        # skip over unpaired reads
-        !BAM.isfilled(record1) && continue
-        !BAM.isfilled(record2) && continue
+        record1 = queue[1]
+        record2 = queue[2]
+        #println("read1 ",BAM.tempname(record1)," ",BAM.flag(record1) & SAM.FLAG_READ1," ",BAM.flag(record1) & SAM.FLAG_READ2)
+        #println("read2 ",BAM.tempname(record2)," ",BAM.flag(record2) & SAM.FLAG_READ1," ",BAM.flag(record2) & SAM.FLAG_READ2)
 
         # ignore bad read pairs (not properly mapped, duplicates etc)
-        BAM.flag(record1) & SAM.FLAG_PROPER_PAIR == 0 && continue
-        BAM.flag(record1) & SAM.FLAG_SECONDARY ≠ 0 && continue
-        BAM.flag(record1) & SAM.FLAG_QCFAIL ≠ 0 && continue
-        BAM.flag(record1) & SAM.FLAG_DUP ≠ 0 && continue
-        BAM.flag(record1) & SAM.FLAG_SUPPLEMENTARY ≠ 0 && continue
-        BAM.mappingquality(record1) < mapQ_threshold && continue
-        BAM.flag(record2) & SAM.FLAG_PROPER_PAIR == 0 && continue
-        BAM.flag(record2) & SAM.FLAG_SECONDARY ≠ 0 && continue
-        BAM.flag(record2) & SAM.FLAG_QCFAIL ≠ 0 && continue
-        BAM.flag(record2) & SAM.FLAG_DUP ≠ 0 && continue
-        BAM.flag(record2) & SAM.FLAG_SUPPLEMENTARY ≠ 0 && continue
-        BAM.mappingquality(record2) < mapQ_threshold && continue
+        if !pairpassesmuster(BAM.flag(record1),BAM.flag(record2)) || BAM.mappingquality(record1) < mapQ_threshold ||BAM.mappingquality(record2) < mapQ_threshold
+            empty!(queue)
+            continue
+        end
+
         #println("counting pair ",BAM.tempname(record1)," ",BAM.tempname(record2))
 
         refindex = BAM.refid(record1) #both reads should have same reference as they are a proper pair
@@ -56,7 +72,6 @@ function pairedcountbases(refseqs::Array{LongDNASeq},reader::BAM.Reader,mapQ_thr
         # progress tracking
         #num_pairs += 1
         #if num_pairs%1000 == 0; print(num_pairs,"\r");end
-
 
         refpos1 = BAM.position(record1)
         ops1, oplens1 = BAM.cigar_rle(record1)
@@ -73,7 +88,7 @@ function pairedcountbases(refseqs::Array{LongDNASeq},reader::BAM.Reader,mapQ_thr
         #println(seq2," ",range2)
 
         forward = isforwardstrand(record1)
-        forward ? matches = contextwindow : matches = 0
+        matches = 0
         seq1pos = 1
         for (index, op) in enumerate(ops1), n in 1:oplens1[index]
             t2nt = DNA_N
@@ -95,7 +110,10 @@ function pairedcountbases(refseqs::Array{LongDNASeq},reader::BAM.Reader,mapQ_thr
                 seq1pos += 1
             end
             if t2nt ≠ DNA_N && t2nt ≠ t1nt; t1nt = DNA_N; end
-            if ismatchop(op) && (refnt == t1nt || (refnt == DNA_C && forward && t1nt == DNA_T) || (refnt == DNA_G && !forward && t1nt == DNA_A))
+            if ismatchop(op) && (refnt == t1nt || (refnt == DNA_C && forward && t1nt == DNA_T)
+                                || (refnt == DNA_G && !forward && t1nt == DNA_A)
+                                || (refnt == DNA_T && forward && utoc && t1nt == DNA_C)
+                                || (refnt == DNA_A && !forward && utoc && t1nt == DNA_G))
                 matches += 1
             else
                 matches = 0
@@ -117,7 +135,7 @@ function pairedcountbases(refseqs::Array{LongDNASeq},reader::BAM.Reader,mapQ_thr
             end
         end
         forward = isforwardstrand(record2)
-        forward ? matches = contextwindow : matches = 0
+        matches = 0
         seq2pos = 1
         alreadycounted = false
         for (index, op) in enumerate(ops2), n in 1:oplens2[index]
@@ -141,7 +159,10 @@ function pairedcountbases(refseqs::Array{LongDNASeq},reader::BAM.Reader,mapQ_thr
                 seq2pos += 1
             end
             if t1nt ≠ DNA_N && t2nt ≠ t1nt; t2nt = DNA_N; end
-            if ismatchop(op) && (refnt == t2nt || (refnt == DNA_C && forward && t2nt == DNA_T) || (refnt == DNA_G && !forward && t2nt == DNA_A))
+            if ismatchop(op) && (refnt == t1nt || (refnt == DNA_C && forward && t1nt == DNA_T)
+                                || (refnt == DNA_G && !forward && t1nt == DNA_A)
+                                || (refnt == DNA_T && forward && utoc && t1nt == DNA_C)
+                                || (refnt == DNA_A && !forward && utoc && t1nt == DNA_G))
                 matches += 1
             else
                 matches = 0
@@ -161,17 +182,26 @@ function pairedcountbases(refseqs::Array{LongDNASeq},reader::BAM.Reader,mapQ_thr
                 end
             end
         end
+        empty!(queue)
     end
     return fwd_base_counts,rev_base_counts
 end
 
-function unpairedcountbases(refseqs::Array{LongDNASeq},reader::BAM.Reader,mapQ_threshold::Int,baseQ_threshold::Int,contextwindow::Int)
-    fwd_base_counts = Array{Array{Int}}(undef,len(refseqs))
-    rev_base_counts = Array{Array{Int}}(undef,len(refseqs))
+function unpairpassesmuster(flags)
+    flags & SAM.FLAG_SECONDARY ≠ 0 && return false
+    flags & SAM.FLAG_QCFAIL ≠ 0 && return false
+    flags & SAM.FLAG_DUP ≠ 0 && return false
+    flags & SAM.FLAG_SUPPLEMENTARY ≠ 0 && return false
+    return true
+end
+
+function unpairedcountbases(refseqs::Array{LongDNASeq},reader::BAM.Reader,mapQ_threshold::Int,baseQ_threshold::Int,contextwindow::Int,utoc::Bool)
+    fwd_base_counts = Array{Array{Int}}(undef,length(refseqs))
+    rev_base_counts = Array{Array{Int}}(undef,length(refseqs))
 
     for (index,ref) in enumerate(refseqs)
-        fwd_base_counts[index] = zeros(Int64, len(ref), 4)
-        rev_base_counts[index] = zeros(Int64, len(ref), 4)
+        fwd_base_counts[index] = zeros(Int64, length(ref), 4)
+        rev_base_counts[index] = zeros(Int64, length(ref), 4)
     end
 
     fwd_bases = Dict(DNA_A=>1, DNA_C=>2, DNA_G=>3, DNA_T=>4)
@@ -179,14 +209,14 @@ function unpairedcountbases(refseqs::Array{LongDNASeq},reader::BAM.Reader,mapQ_t
 
     record1 = BAM.Record()
 
-    while !eof(reader)
-        read!(reader, record1)
+    for record1 in reader
         !BAM.isfilled(record1) && continue
-        BAM.flag(record1) & SAM.FLAG_SECONDARY ≠ 0 && continue
-        BAM.flag(record1) & SAM.FLAG_QCFAIL ≠ 0 && continue
-        BAM.flag(record1) & SAM.FLAG_DUP ≠ 0 && continue
-        BAM.flag(record1) & SAM.FLAG_SUPPLEMENTARY ≠ 0 && continue
-        BAM.mappingquality(record1) < mapQ_threshold && continue
+
+        # ignore bad read pairs (not properly mapped, duplicates etc)
+        if !unpairpassesmuster(BAM.flag(record1)) || BAM.mappingquality(record1) < mapQ_threshold
+            continue
+        end
+
         refindex = BAM.refid(record1)
 
         refpos1 = BAM.position(record1)
@@ -196,7 +226,7 @@ function unpairedcountbases(refseqs::Array{LongDNASeq},reader::BAM.Reader,mapQ_t
         range1 = refpos1:first(seq2ref(BAM.alignment(record1),length(seq1)))
 
         forward = isforwardstrand(record1)
-        forward ? matches = contextwindow : matches = 0
+        matches = 0
         seqpos = 1
         for (index, op) in enumerate(ops), n in 1:oplens[index]
             if isinsertop(op)
@@ -213,7 +243,10 @@ function unpairedcountbases(refseqs::Array{LongDNASeq},reader::BAM.Reader,mapQ_t
                 t1nt = seq1[seqpos]
                 seqpos += 1
             end
-            if ismatchop(op) && (refnt == t1nt || (refnt == DNA_C && forward && t1nt == DNA_T) || (refnt == DNA_G && !forward && t1nt == DNA_A))
+            if ismatchop(op) && (refnt == t1nt || (refnt == DNA_C && forward && t1nt == DNA_T)
+                                || (refnt == DNA_G && !forward && t1nt == DNA_A)
+                                || (refnt == DNA_T && forward && utoc && t1nt == DNA_C)
+                                || (refnt == DNA_A && !forward && utoc && t1nt == DNA_G))
                 matches += 1
             else
                 matches = 0
